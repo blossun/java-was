@@ -2,10 +2,10 @@ package webserver;
 
 import db.DataBase;
 import model.HttpRequest;
+import model.HttpResponse;
 import model.User;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import util.HttpRequestUtils;
 
 import java.io.*;
 import java.net.Socket;
@@ -17,8 +17,7 @@ import java.util.Map;
 import static constants.CommonConstants.*;
 import static constants.ContentTypeConstants.TEXT_CSS;
 import static constants.ErrorConstants.METHOD_NOT_ALLOWED;
-import static constants.RequestHeaderConstants.CONTENT_LENGTH;
-import static constants.RequestHeaderConstants.COOKIE;
+import static constants.RequestHeaderConstants.CONTENT_TYPE;
 
 public class RequestHandler extends Thread {
     private static final Logger log = LoggerFactory.getLogger(RequestHandler.class);
@@ -36,16 +35,17 @@ public class RequestHandler extends Thread {
         try (InputStream in = connection.getInputStream(); OutputStream out = connection.getOutputStream()) {
             BufferedReader br = new BufferedReader(new InputStreamReader(in));
             HttpRequest httpRequest = new HttpRequest(br);
+            HttpResponse httpResponse = new HttpResponse();
             if (httpRequest.isUrlNull()) {
                 log.error("400 Bad Request");
                 return;
             }
             switch (httpRequest.getHttpMethod()) {
                 case GET:
-                    httpGetRequestHandler(out, httpRequest);
+                    httpGetRequestHandler(out, httpRequest, httpResponse);
                     break;
                 case POST:
-                    httpPostRequestHandler(out, httpRequest);
+                    httpPostRequestHandler(out, httpRequest, httpResponse);
                     break;
                 case PUT:
                     break;
@@ -54,71 +54,74 @@ public class RequestHandler extends Thread {
                 default:
                     log.error(METHOD_NOT_ALLOWED);
             }
+            DataOutputStream dos = new DataOutputStream(out);
+            dos.writeBytes(httpResponse.getHttpResponseString());
+            dos.flush();
         } catch (IOException e) {
             log.error(e.getMessage());
         }
     }
 
-    private void httpPostRequestHandler(OutputStream out, HttpRequest httpRequest) throws IOException {
+    private void httpPostRequestHandler(OutputStream out, HttpRequest httpRequest, HttpResponse httpResponse) throws IOException {
         String url = httpRequest.getUrl();
         if (url.contains("create")) {
-            userCreateRequestHandler(out, httpRequest);
+            userCreateRequestHandler(out, httpRequest, httpResponse);
         } else if (url.contains("login")) {
-            loginRequestHandler(out, httpRequest);
+            loginRequestHandler(out, httpRequest, httpResponse);
         }
     }
 
-    private void loginRequestHandler(OutputStream out, HttpRequest httpRequest) {
+    private void loginRequestHandler(OutputStream out, HttpRequest httpRequest, HttpResponse httpResponse) {
         User loginUser = DataBase.findUserById(httpRequest.getParams().get(USER_ID)).orElse(null);
         String inputPassword = httpRequest.getParams().get(PASSWORD);
         boolean setCookie = false;
         if (loginUser != null && loginUser.getPassword().equals(inputPassword)) {
             setCookie = true;
         }
-        DataOutputStream dos = new DataOutputStream(out);
         String redirectUrl = "/index.html";
-        response302Header(dos, redirectUrl, setCookie);
+        httpResponse.set302ResponseStatusLine();
+        httpResponse.putResponseHeader("Location", redirectUrl);
+        httpResponse.putResponseHeader("Set-Cookie", LOGIN_COOKIE_ID + "=" + setCookie + "; Path=/\r\n");
     }
 
-    private void userCreateRequestHandler(OutputStream out, HttpRequest httpRequest) throws UnsupportedEncodingException {
+    private void userCreateRequestHandler(OutputStream out, HttpRequest httpRequest, HttpResponse httpResponse) throws UnsupportedEncodingException {
         User newUser = new User(httpRequest.getParams());
         DataBase.addUser(newUser);
         log.debug("user : {}", newUser);
-        DataOutputStream dos = new DataOutputStream(out);
         String redirectUrl = "/index.html";
-        response302Header(dos, redirectUrl);
+        httpResponse.set302ResponseStatusLine();
+        httpResponse.putResponseHeader("Location", redirectUrl);
     }
 
-    private void httpGetRequestHandler(OutputStream out, HttpRequest httpRequest) throws IOException {
+    private void httpGetRequestHandler(OutputStream out, HttpRequest httpRequest, HttpResponse httpResponse) throws IOException {
         String url = httpRequest.getUrl();
         if (url.contains("/user/list")) {
-            showUserList(out, httpRequest);
+            showUserList(out, httpRequest, httpResponse);
             return;
         }
         byte[] body = Files.readAllBytes(new File("./webapp" + url).toPath());
         log.trace("body : {}", new String(body, UTF_8));
         DataOutputStream dos = new DataOutputStream(out);
+        httpResponse.set200ResponseStatusLine();
         if (url.endsWith(".css")) {
-            response200Header(dos, body.length, TEXT_CSS);
-        } else {
-            response200Header(dos, body.length);
+            httpResponse.putResponseHeader(CONTENT_TYPE, TEXT_CSS);
         }
-        responseBody(dos, body);
     }
 
-    private void showUserList(OutputStream out, HttpRequest httpRequest) throws IOException {
+    private void showUserList(OutputStream out, HttpRequest httpRequest, HttpResponse httpResponse) throws IOException {
         boolean isLogined;
         String url = httpRequest.getUrl();
         Map<String, String> cookies = httpRequest.getCookies();
         isLogined = Boolean.parseBoolean(cookies.get(LOGIN_COOKIE_ID));
         DataOutputStream dos = new DataOutputStream(out);
         if (!isLogined) {
-            response302Header(dos, "/index.html", isLogined);
+            httpResponse.set302ResponseStatusLine();
+            httpResponse.putResponseHeader("Location", "/index.html");
+            httpResponse.putResponseHeader("Set-Cookie", LOGIN_COOKIE_ID + "=" + isLogined + "; Path=/\r\n");
             return;
         }
         byte[] body = hardBar(url);
-        response200Header(dos, body.length);
-        responseBody(dos, body);
+        httpResponse.set200ResponseStatusLine();
     }
 
     private byte[] hardBar(String url) throws IOException {
@@ -138,57 +141,5 @@ public class RequestHandler extends Thread {
         byte[] body = Files.readAllBytes(new File("./webapp" + url).toPath());
         body = new String(body, StandardCharsets.UTF_8).replaceAll("\\{\\{users}}", sb.toString()).getBytes();
         return body;
-    }
-
-    private void response200Header(DataOutputStream dos, int lengthOfBodyContent) {
-        try {
-            dos.writeBytes("HTTP/1.1 200 OK \r\n");
-            dos.writeBytes("Content-Type: text/html;charset=utf-8\r\n");
-            dos.writeBytes(CONTENT_LENGTH + ": " + lengthOfBodyContent + "\r\n");
-            dos.writeBytes("\r\n");
-        } catch (IOException e) {
-            log.error(e.getMessage());
-        }
-    }
-
-    private void response200Header(DataOutputStream dos, int lengthOfBodyContent, String contentType) {
-        try {
-            dos.writeBytes("HTTP/1.1 200 OK \r\n");
-            dos.writeBytes("Content-Type: " + contentType + "\r\n");
-            dos.writeBytes(CONTENT_LENGTH + ": " + lengthOfBodyContent + "\r\n");
-            dos.writeBytes("\r\n");
-        } catch (IOException e) {
-            log.error(e.getMessage());
-        }
-    }
-
-    private void response302Header(DataOutputStream dos, String url) {
-        try {
-            dos.writeBytes("HTTP/1.1 302 Found \r\n");
-            dos.writeBytes("Location: " + url + " \r\n");
-            dos.writeBytes("\r\n");
-        } catch (IOException e) {
-            log.error(e.getMessage());
-        }
-    }
-
-    private void response302Header(DataOutputStream dos, String url, boolean setCookie) {
-        try {
-            dos.writeBytes("HTTP/1.1 302 Found \r\n");
-            dos.writeBytes("Location: " + url + " \r\n");
-            dos.writeBytes("Set-Cookie: " + LOGIN_COOKIE_ID + "=" + setCookie + "; Path=/\r\n");
-            dos.writeBytes("\r\n");
-        } catch (IOException e) {
-            log.error(e.getMessage());
-        }
-    }
-
-    private void responseBody(DataOutputStream dos, byte[] body) {
-        try {
-            dos.write(body, 0, body.length);
-            dos.flush();
-        } catch (IOException e) {
-            log.error(e.getMessage());
-        }
     }
 }
